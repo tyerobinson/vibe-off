@@ -31,16 +31,71 @@ const ROUTE_PALETTE = [
 ];
 
 const CHARACTERS = [
-  'mario',
-  'luigi',
-  'peach',
-  'daisy',
-  'yoshi',
-  'toad',
+  'baby-daisy',
+  'baby-luigi',
+  'baby-mario',
+  'baby-peach',
+  'baby-rosalina',
   'bowser',
-  'wario',
+  'bowser-jr',
+  'cat-peach',
+  'daisy',
+  'diddy-kong',
   'donkey-kong',
+  'dry-bones',
+  'dry-bowser',
+  'funky-kong',
+  'gold-mario',
+  'iggy',
+  'inkling-boy',
+  'inkling-girl',
+  'isabelle',
+  'kamek',
+  'king-boo',
+  'koopa-troopa',
+  'lakitu',
+  'larry',
+  'lemmy',
+  'link',
+  'ludwig',
+  'luigi',
+  'mario',
+  'metal-mario',
+  'morton',
+  'pauline',
+  'peach',
+  'peachette',
+  'petey-piranha',
+  'pink-gold-peach',
   'rosalina',
+  'roy',
+  'shy-guy',
+  'shy-guy-black',
+  'shy-guy-blue',
+  'shy-guy-green',
+  'shy-guy-light-blue',
+  'shy-guy-orange',
+  'shy-guy-pink',
+  'shy-guy-white',
+  'shy-guy-yellow',
+  'tanooki-mario',
+  'toad',
+  'toadette',
+  'villager-female',
+  'villager-male',
+  'waluigi',
+  'wario',
+  'wendy',
+  'wiggler',
+  'yoshi',
+  'yoshi-black',
+  'yoshi-blue',
+  'yoshi-light-blue',
+  'yoshi-orange',
+  'yoshi-pink',
+  'yoshi-red',
+  'yoshi-white',
+  'yoshi-yellow',
 ] as const;
 
 function hashString(s: string): number {
@@ -111,10 +166,18 @@ function animsToGeoJson(
     const t = easeInOut(Math.max(0, Math.min(1, raw)));
     const lng = a.from[0] + (a.to[0] - a.from[0]) * t;
     const lat = a.from[1] + (a.to[1] - a.from[1]) * t;
+    const dx = a.to[0] - a.from[0];
+    const dy = a.to[1] - a.from[1];
+    let bearing = (a.props.bearing as number | undefined) ?? 0;
+    let hasBearing = bearing !== 0;
+    if (Math.abs(dx) + Math.abs(dy) > 1e-7) {
+      bearing = ((Math.atan2(dx, dy) * 180) / Math.PI + 360) % 360;
+      hasBearing = true;
+    }
     features.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [lng, lat] },
-      properties: a.props,
+      properties: { ...a.props, bearing, hasBearing },
     });
   }
   return { type: 'FeatureCollection', features };
@@ -190,6 +253,34 @@ export function BusMap() {
         }),
       );
 
+      const arrowCanvas = document.createElement('canvas');
+      arrowCanvas.width = 64;
+      arrowCanvas.height = 64;
+      const arrowCtx = arrowCanvas.getContext('2d');
+      if (arrowCtx) {
+        arrowCtx.fillStyle = 'rgba(15, 17, 22, 0.92)';
+        arrowCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+        arrowCtx.lineWidth = 3;
+        arrowCtx.lineJoin = 'round';
+        arrowCtx.beginPath();
+        arrowCtx.moveTo(32, 3);
+        arrowCtx.lineTo(58, 34);
+        arrowCtx.lineTo(42, 34);
+        arrowCtx.lineTo(42, 60);
+        arrowCtx.lineTo(22, 60);
+        arrowCtx.lineTo(22, 34);
+        arrowCtx.lineTo(6, 34);
+        arrowCtx.closePath();
+        arrowCtx.fill();
+        arrowCtx.stroke();
+        if (!map.hasImage('bus-arrow')) {
+          map.addImage(
+            'bus-arrow',
+            arrowCtx.getImageData(0, 0, 64, 64),
+          );
+        }
+      }
+
       map.addSource('bus-trails', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
@@ -226,6 +317,30 @@ export function BusMap() {
           'circle-stroke-width': 2,
           'circle-stroke-color': ['get', 'color'],
           'circle-stroke-opacity': 0.6,
+        },
+      });
+
+      map.addLayer({
+        id: 'buses-arrow',
+        type: 'symbol',
+        source: 'buses',
+        filter: ['==', ['get', 'hasBearing'], true],
+        layout: {
+          'icon-image': 'bus-arrow',
+          'icon-rotate': ['get', 'bearing'],
+          'icon-rotation-alignment': 'map',
+          'icon-pitch-alignment': 'map',
+          'icon-anchor': 'bottom',
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
+          'icon-size': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            8, 0.22,
+            12, 0.38,
+            16, 0.6,
+          ],
         },
       });
 
