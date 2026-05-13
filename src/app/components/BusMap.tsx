@@ -30,12 +30,33 @@ const ROUTE_PALETTE = [
   '#bab0ac',
 ];
 
-function colorForRoute(routeId: string): string {
+const CHARACTERS = [
+  'mario',
+  'luigi',
+  'peach',
+  'daisy',
+  'yoshi',
+  'toad',
+  'bowser',
+  'wario',
+  'donkey-kong',
+  'rosalina',
+] as const;
+
+function hashString(s: string): number {
   let hash = 0;
-  for (let i = 0; i < routeId.length; i += 1) {
-    hash = (hash * 31 + routeId.charCodeAt(i)) | 0;
+  for (let i = 0; i < s.length; i += 1) {
+    hash = (hash * 31 + s.charCodeAt(i)) | 0;
   }
-  return ROUTE_PALETTE[Math.abs(hash) % ROUTE_PALETTE.length];
+  return Math.abs(hash);
+}
+
+function colorForRoute(routeId: string): string {
+  return ROUTE_PALETTE[hashString(routeId) % ROUTE_PALETTE.length];
+}
+
+function characterForBus(busId: string): string {
+  return CHARACTERS[hashString(busId) % CHARACTERS.length];
 }
 
 function trailsToGeoJson(
@@ -109,6 +130,7 @@ function busProps(b: Bus): Record<string, unknown> {
     status: b.status,
     label: b.label,
     color: colorForRoute(b.routeId),
+    character: characterForBus(b.id),
   };
 }
 
@@ -154,7 +176,20 @@ export function BusMap() {
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
-    map.on('load', () => {
+    map.on('load', async () => {
+      await Promise.all(
+        CHARACTERS.map(async (name) => {
+          try {
+            const img = await map.loadImage(`/characters/${name}.png`);
+            if (!map.hasImage(name)) {
+              map.addImage(name, img.data);
+            }
+          } catch {
+            // ignore individual image failures; symbol layer will skip
+          }
+        }),
+      );
+
       map.addSource('bus-trails', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
@@ -185,21 +220,32 @@ export function BusMap() {
         type: 'circle',
         source: 'buses',
         paint: {
-          'circle-radius': 9,
+          'circle-radius': 14,
           'circle-color': ['get', 'color'],
           'circle-opacity': 0.25,
+          'circle-stroke-width': 2,
+          'circle-stroke-color': ['get', 'color'],
+          'circle-stroke-opacity': 0.6,
         },
       });
 
       map.addLayer({
-        id: 'buses-dot',
-        type: 'circle',
+        id: 'buses-icon',
+        type: 'symbol',
         source: 'buses',
-        paint: {
-          'circle-radius': 5,
-          'circle-color': ['get', 'color'],
-          'circle-stroke-width': 1.5,
-          'circle-stroke-color': '#ffffff',
+        layout: {
+          'icon-image': ['get', 'character'],
+          'icon-size': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            8, 0.15,
+            12, 0.28,
+            16, 0.45,
+          ],
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
+          'icon-anchor': 'center',
         },
       });
 
@@ -212,7 +258,7 @@ export function BusMap() {
           'text-field': ['get', 'routeId'],
           'text-font': ['Noto Sans Regular'],
           'text-size': 10,
-          'text-offset': [0, 1.1],
+          'text-offset': [0, 1.6],
           'text-anchor': 'top',
         },
         paint: {
@@ -241,7 +287,7 @@ export function BusMap() {
         closeButton: false,
         closeOnClick: false,
       });
-      map.on('mouseenter', 'buses-dot', (e) => {
+      map.on('mouseenter', 'buses-icon', (e) => {
         map.getCanvas().style.cursor = 'pointer';
         const f = e.features?.[0];
         if (!f) return;
@@ -254,7 +300,7 @@ export function BusMap() {
           </div>`;
         popup.setLngLat(e.lngLat).setHTML(html).addTo(map);
       });
-      map.on('mouseleave', 'buses-dot', () => {
+      map.on('mouseleave', 'buses-icon', () => {
         map.getCanvas().style.cursor = '';
         popup.remove();
       });
