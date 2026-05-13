@@ -11,11 +11,11 @@ const TILE_URL =
   'REDACTED';
 
 const PHOENIX_CENTER: [number, number] = [-112.07, 33.45];
-const POLL_INTERVAL_MS = 10_000;
+const POLL_INTERVAL_MS = 3_000;
 const TRAIL_MAX_POINTS = 60;
 // Stretch the move across roughly the full poll window so dots glide
 // continuously between refreshes instead of teleporting.
-const ANIMATE_DURATION_MS = 9_500;
+const ANIMATE_DURATION_MS = 2_800;
 
 const ROUTE_PALETTE = [
   '#4e79a7',
