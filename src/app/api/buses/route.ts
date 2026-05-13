@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-const FEED_URL = 'REDACTED';
+const FEED_URL = process.env.GTFS_FEED_URL!;
 const CACHE_TTL_MS = 5_000;
 
 type GtfsRtResponse = {

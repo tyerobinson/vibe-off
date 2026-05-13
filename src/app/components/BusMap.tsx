@@ -7,8 +7,7 @@ import { layers, namedFlavor } from '@protomaps/basemaps';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import type { Bus, BusesResponse } from '@/app/api/buses/route';
 
-const TILE_URL =
-  'REDACTED';
+const TILE_URL = process.env.NEXT_PUBLIC_TILE_URL!;
 
 const PHOENIX_CENTER: [number, number] = [-112.07, 33.45];
 const POLL_INTERVAL_MS = 3_000;
