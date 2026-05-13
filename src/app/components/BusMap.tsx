@@ -12,6 +12,10 @@ const TILE_URL =
 
 const PHOENIX_CENTER: [number, number] = [-112.07, 33.45];
 const POLL_INTERVAL_MS = 10_000;
+const TRAIL_MAX_POINTS = 60;
+// Stretch the move across roughly the full poll window so dots glide
+// continuously between refreshes instead of teleporting.
+const ANIMATE_DURATION_MS = 9_500;
 
 const ROUTE_PALETTE = [
   '#4e79a7',
@@ -34,23 +38,77 @@ function colorForRoute(routeId: string): string {
   return ROUTE_PALETTE[Math.abs(hash) % ROUTE_PALETTE.length];
 }
 
-function busesToGeoJson(buses: Bus[]): GeoJSON.FeatureCollection {
-  return {
-    type: 'FeatureCollection',
-    features: buses.map((b) => ({
+function trailsToGeoJson(
+  history: Map<string, [number, number][]>,
+): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+  for (const points of history.values()) {
+    if (points.length < 2) continue;
+    const maxIdx = points.length - 1;
+    for (let i = 0; i < maxIdx; i += 1) {
+      // Newest segments get the warm end of the rainbow (hue 0 = red).
+      // Older segments shift toward violet (hue ~280).
+      const age = maxIdx - 1 - i;
+      const t = maxIdx <= 1 ? 0 : age / (maxIdx - 1);
+      const hue = t * 280;
+      const opacity = 0.85 * (1 - t * 0.7);
+      features.push({
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [points[i], points[i + 1]],
+        },
+        properties: {
+          color: `hsl(${hue.toFixed(0)}, 95%, 55%)`,
+          opacity,
+        },
+      });
+    }
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+type BusAnim = {
+  from: [number, number];
+  to: [number, number];
+  start: number;
+  duration: number;
+  props: Record<string, unknown>;
+};
+
+function easeInOut(t: number): number {
+  return t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2;
+}
+
+function animsToGeoJson(
+  anims: Map<string, BusAnim>,
+  now: number,
+): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+  for (const a of anims.values()) {
+    const raw = a.duration > 0 ? (now - a.start) / a.duration : 1;
+    const t = easeInOut(Math.max(0, Math.min(1, raw)));
+    const lng = a.from[0] + (a.to[0] - a.from[0]) * t;
+    const lat = a.from[1] + (a.to[1] - a.from[1]) * t;
+    features.push({
       type: 'Feature',
-      geometry: { type: 'Point', coordinates: [b.lng, b.lat] },
-      properties: {
-        id: b.id,
-        routeId: b.routeId,
-        directionId: b.directionId,
-        bearing: b.bearing ?? 0,
-        speed: b.speed,
-        status: b.status,
-        label: b.label,
-        color: colorForRoute(b.routeId),
-      },
-    })),
+      geometry: { type: 'Point', coordinates: [lng, lat] },
+      properties: a.props,
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+function busProps(b: Bus): Record<string, unknown> {
+  return {
+    id: b.id,
+    routeId: b.routeId,
+    directionId: b.directionId,
+    bearing: b.bearing ?? 0,
+    speed: b.speed,
+    status: b.status,
+    label: b.label,
+    color: colorForRoute(b.routeId),
   };
 }
 
@@ -58,7 +116,10 @@ export function BusMap() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const sourceReadyRef = useRef(false);
-  const latestDataRef = useRef<GeoJSON.FeatureCollection | null>(null);
+  const latestTrailsRef = useRef<GeoJSON.FeatureCollection | null>(null);
+  const historyRef = useRef<Map<string, [number, number][]>>(new Map());
+  const animsRef = useRef<Map<string, BusAnim>>(new Map());
+  const rafRef = useRef<number | null>(null);
   const [busCount, setBusCount] = useState<number | null>(null);
   const [feedTimestamp, setFeedTimestamp] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,6 +155,26 @@ export function BusMap() {
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
     map.on('load', () => {
+      map.addSource('bus-trails', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      map.addLayer({
+        id: 'bus-trails-line',
+        type: 'line',
+        source: 'bus-trails',
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round',
+        },
+        paint: {
+          'line-color': ['get', 'color'],
+          'line-opacity': ['get', 'opacity'],
+          'line-width': 3,
+        },
+      });
+
       map.addSource('buses', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
@@ -143,11 +224,17 @@ export function BusMap() {
 
       sourceReadyRef.current = true;
 
-      if (latestDataRef.current) {
+      if (animsRef.current.size > 0) {
         const src = map.getSource('buses') as
           | maplibregl.GeoJSONSource
           | undefined;
-        src?.setData(latestDataRef.current);
+        src?.setData(animsToGeoJson(animsRef.current, performance.now()));
+      }
+      if (latestTrailsRef.current) {
+        const src = map.getSource('bus-trails') as
+          | maplibregl.GeoJSONSource
+          | undefined;
+        src?.setData(latestTrailsRef.current);
       }
 
       const popup = new maplibregl.Popup({
@@ -176,23 +263,117 @@ export function BusMap() {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
+    function frame() {
+      rafRef.current = null;
+      if (cancelled) return;
+      const now = performance.now();
+      const anims = animsRef.current;
+      let stillAnimating = false;
+      for (const a of anims.values()) {
+        if (now - a.start < a.duration) {
+          stillAnimating = true;
+          break;
+        }
+      }
+      if (sourceReadyRef.current && mapRef.current) {
+        const src = mapRef.current.getSource('buses') as
+          | maplibregl.GeoJSONSource
+          | undefined;
+        src?.setData(animsToGeoJson(anims, now));
+      }
+      if (stillAnimating) {
+        rafRef.current = requestAnimationFrame(frame);
+      }
+    }
+
+    function scheduleFrame() {
+      if (rafRef.current == null) {
+        rafRef.current = requestAnimationFrame(frame);
+      }
+    }
+
     async function tick() {
       try {
         const res = await fetch('/api/buses', { cache: 'no-store' });
         if (!res.ok) throw new Error(`api ${res.status}`);
         const json = (await res.json()) as BusesResponse;
         if (cancelled) return;
-        const data = busesToGeoJson(json.buses);
-        latestDataRef.current = data;
+
+        const now = performance.now();
+        const anims = animsRef.current;
+        const seen = new Set<string>();
+        for (const bus of json.buses) {
+          seen.add(bus.id);
+          const target: [number, number] = [bus.lng, bus.lat];
+          const props = busProps(bus);
+          const existing = anims.get(bus.id);
+          if (!existing) {
+            anims.set(bus.id, {
+              from: target,
+              to: target,
+              start: now,
+              duration: 0,
+              props,
+            });
+            continue;
+          }
+          if (
+            existing.to[0] === target[0] &&
+            existing.to[1] === target[1]
+          ) {
+            existing.props = props;
+            continue;
+          }
+          // Compute current interpolated position so the animation
+          // restarts smoothly from wherever the dot is right now.
+          const raw =
+            existing.duration > 0
+              ? (now - existing.start) / existing.duration
+              : 1;
+          const t = easeInOut(Math.max(0, Math.min(1, raw)));
+          const curLng = existing.from[0] + (existing.to[0] - existing.from[0]) * t;
+          const curLat = existing.from[1] + (existing.to[1] - existing.from[1]) * t;
+          existing.from = [curLng, curLat];
+          existing.to = target;
+          existing.start = now;
+          existing.duration = ANIMATE_DURATION_MS;
+          existing.props = props;
+        }
+        for (const id of Array.from(anims.keys())) {
+          if (!seen.has(id)) anims.delete(id);
+        }
+
+        const history = historyRef.current;
+        for (const bus of json.buses) {
+          const prev = history.get(bus.id);
+          const point: [number, number] = [bus.lng, bus.lat];
+          if (!prev) {
+            history.set(bus.id, [point]);
+            continue;
+          }
+          const last = prev[prev.length - 1];
+          if (last[0] === point[0] && last[1] === point[1]) continue;
+          prev.push(point);
+          if (prev.length > TRAIL_MAX_POINTS) {
+            prev.splice(0, prev.length - TRAIL_MAX_POINTS);
+          }
+        }
+        for (const id of history.keys()) {
+          if (!seen.has(id)) history.delete(id);
+        }
+        const trails = trailsToGeoJson(history);
+        latestTrailsRef.current = trails;
+
         setBusCount(json.buses.length);
         setFeedTimestamp(json.feedTimestamp);
         setError(null);
         if (sourceReadyRef.current && mapRef.current) {
-          const src = mapRef.current.getSource('buses') as
+          const trailSrc = mapRef.current.getSource('bus-trails') as
             | maplibregl.GeoJSONSource
             | undefined;
-          src?.setData(data);
+          trailSrc?.setData(trails);
         }
+        scheduleFrame();
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : 'fetch failed');
@@ -208,6 +389,10 @@ export function BusMap() {
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
       mapRef.current = null;
       sourceReadyRef.current = false;
       map.remove();
